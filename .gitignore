@@ -1,0 +1,26 @@
+.venv
+.env
+__pycache__/
+tmp
+
+# raw datasets and derived caches are never tracked
+data/cicids2017/*
+!data/cicids2017/.gitkeep
+data/kitsune/*
+!data/kitsune/.gitkeep
+data/ctu13/*
+!data/ctu13/.gitkeep
+data/phishing-operational/*
+!data/phishing-operational/README.md
+!data/phishing-operational/SOURCES.md
+!data/phishing-operational/manifest.example.csv
+!data/phishing-operational/ACQUISITION_SHA256.tsv
+
+# run outputs
+results/
+models/
+ml_llm_ensembles/experiments/*.result.json
+ml_llm_ensembles/experiments/*.plot_data*.csv
+ml_llm_ensembles/experiments/13_phishing_operational.*.png
+ml_llm_ensembles/experiments/smoke/
+ml_llm_ensembles/experiments/__pycache__/

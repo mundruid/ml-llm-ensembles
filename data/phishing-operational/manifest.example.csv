@@ -1,0 +1,8 @@
+asset_id,path,format,source_corpus,source_version,text_field,label_field,mapping,license_note
+nazario,raw/nazario/,eml_dir,nazario,2005-2015 mboxes exported to eml,,phishing,nazario_phishing,"Nazario phishing corpus; research use"
+sa_easy_ham,raw/spamassassin/easy_ham/,eml_dir,spamassassin_easy_ham,20030228,,easy_ham,spamassassin,"Apache SpamAssassin public corpus"
+sa_hard_ham,raw/spamassassin/hard_ham/,eml_dir,spamassassin_hard_ham,20030228,,hard_ham,spamassassin,"Apache SpamAssassin public corpus"
+sa_spam,raw/spamassassin/spam/,eml_dir,spamassassin_spam,20030228,,spam,spamassassin,"Apache SpamAssassin public corpus"
+enron,raw/enron_sample.csv,csv,enron,CMU 2015 release,message,label,enron_ham,"Enron corpus; public"
+nigerian,raw/fraudulent_emails.txt.csv,csv,clair_fraud,CLAIR 2008,text,label,nigerian_fraud,"CLAIR fraud collection"
+zefang_liu,raw/zefang_liu.csv,csv,zefang_liu,HF snapshot 2026-06,Email Text,Email Type,zefang_liu,"HF dataset card licence"
