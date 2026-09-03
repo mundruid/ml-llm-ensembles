@@ -2,6 +2,7 @@
 .env
 __pycache__/
 tmp
+.vscode
 
 # raw datasets and derived caches are never tracked
 data/cicids2017/*

@@ -2,7 +2,7 @@
 
 Code to reproduce the experiments in ["We Don't Need a Large Language Model for
 That: When Traditional Machine Learning and Encoders Beat Decoder LLMs in
-Security Classification"](TODO: add arxiv link).
+Security Classification"](docs/paper.pdf).
 
 We compare traditional ML (XGBoost, TabPFN), encoder models (ModernBERT, frozen and
 fine-tuned), and decoder LLMs (zero-shot, local and frontier) on phishing-email and
