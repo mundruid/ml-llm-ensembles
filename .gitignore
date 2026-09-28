@@ -19,8 +19,9 @@ data/phishing-operational/*
 
 # run outputs
 results/
-models/
+models
 ml_llm_ensembles/experiments/*.result.json
+ml_llm_ensembles/experiments/14_cost_*.json
 ml_llm_ensembles/experiments/*.plot_data*.csv
 ml_llm_ensembles/experiments/13_phishing_operational.*.png
 ml_llm_ensembles/experiments/smoke/
