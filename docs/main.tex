@@ -1,0 +1,620 @@
+\documentclass{jmlr}
+\makeatletter
+\renewcommand*{\@jmlrproceedings}{}% blank for blind review; fill in once a venue is known
+\makeatother
+
+% The following packages are loaded automatically by jmlr.cls:
+% amsmath, amssymb, natbib, graphicx, url, algorithm2e
+
+\usepackage{booktabs}
+\usepackage{array}   % for raggedright p{} columns (tabularx is blocked by jmlr.cls)
+\usepackage{float}   % provides the [H] specifier to pin floats exactly in place
+\usepackage{placeins} % \FloatBarrier: keeps a float from drifting past a point, without forcing exact placement (avoids [H]'s whitespace stretching)
+\usepackage{forest}
+\usepackage{capt-of}  % \captionof for non-floating, in-place figures
+\usepackage{tikz}
+\usetikzlibrary{mindmap}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,listings,breakable}
+
+% Styled "prompt" box: a titled, shaded code box (used for the LLM prompt figures)
+\newtcblisting{promptbox}[1]{%
+  listing only, enhanced, breakable=false,
+  colback=gray!3, colframe=black!75,
+  coltitle=white, colbacktitle=black!80,
+  fonttitle=\bfseries\small, title={#1},
+  boxrule=0.5pt, arc=1mm,
+  left=2.5mm, right=2.5mm, top=1.2mm, bottom=1.2mm,
+  listing options={
+    basicstyle=\ttfamily\scriptsize, breaklines=true,
+    columns=fullflexible, keepspaces=true, showstringspaces=false,
+  },
+}
+
+% --- Conference details (fill in once known) ---
+\jmlrvolume{TBD}
+\jmlryear{2026}
+
+\title[We Don't Need an LLM for That]{We Don't Need a Large Language Model for That: When Traditional Machine Learning and Encoders Beat Decoder LLMs in Security Classification}
+
+% \Name{Author Name} \Email{author@example.com}\\
+% \addr Affiliation
+% \author{%
+% \begin{minipage}[t]{0.47\textwidth}
+%   \Name{Casey Wilson}\\
+%   \addr Business Loans\\
+%   \Email{cawilson31@gmail.com}
+% \end{minipage}\hfill
+% \begin{minipage}[t]{0.47\textwidth}
+%   \Name{Xenia Mountrouidou}\\
+%   \addr Appgate\\
+%   \Email{xenia.mountrouidou@appgate.com}
+% \end{minipage}%
+% }
+
+\editor{}
+
+% [SHORTENED] Loosen float-packing thresholds so figures/tables share pages
+% instead of each claiming a sparse float page (layout only, no content change).
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{4}
+\setlength{\bibsep}{0pt plus 0.2ex}  % [SHORTENED] tighter spacing between bibliography entries
+\renewcommand{\arraystretch}{0.95}  % [SHORTENED] mild table row compaction
+% [LAYOUT] Tighten the whitespace between top-placed floats and the text below them
+% (default \textfloatsep is ~20pt with generous stretch, which flush-bottom pages
+% expand into large gaps under the captions of Figs. 1, 4-8). Placement unchanged.
+\setlength{\textfloatsep}{6pt plus 2pt minus 3pt}  % gap between a top/bottom float and body text
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}      % gap between two stacked floats
+\setlength{\intextsep}{6pt plus 2pt minus 2pt}     % gap around [h] in-text floats
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large language models (LLMs) have become an attractive option for cybersecurity classification tasks because they are easy to apply to text-like security data and require little task-specific feature engineering. However, LLM inference can be expensive, general-purpose LLM architectures are not optimized for structured classification, and their effectiveness relative to traditional machine learning remains unclear for well-labeled security datasets.
+
+We compare LLMs and traditional machine learning models on two common cybersecurity classification tasks: phishing email detection and network attack classification. Our evaluation includes standalone zero-shot LLM classifiers, XGBoost, frozen and fine-tuned encoder models including ModernBERT, and two hybrid ML-LLM ensemble designs: a router that invokes an LLM only when the ML model has low confidence, and a meta-learner that trains a second-stage model on both ML and LLM outputs.
+
+Across our evaluated datasets, no standalone decoder LLM or decoder-LLM ensemble meaningfully outperforms the strongest traditional ML baselines. On phishing email detection, zero-shot LLMs perform strongly, but embedding-based ML pipelines and fine-tuned ModernBERT match or exceed them: zero-shot Claude reaches 0.970 AUCPR, while fine-tuned ModernBERT reaches 0.998. On network attack classification, zero-shot LLMs perform at or near the class prior across multiple feature representations, while XGBoost remains strong on named and aggregated tabular features; on aggregated flow statistics, XGBoost reaches 0.845 while zero-shot LLMs sit near the 0.403 prior. Fine-tuning an encoder model recovers useful signal from serialized flow statistics, but it ties rather than beats XGBoost. We further evaluate generalization and operational cost on new captures: under campaign-disjoint splits of CTU-13 at its observed $2.5\%$ prior, XGBoost retains its ranking advantage while two of three zero-shot decoders remain near the class prior (Gemma3 retains partial signal), and a subtype-decomposed false-positive analysis of phishing detectors reveals a bulk-spam failure mode, invisible to pooled AUCPR, that a matched-budget hard-negative training intervention largely removes.
+
+The ensemble results reinforce this. On the network tasks, routing uncertain examples to an at-chance LLM reduces AUCPR as more traffic is escalated, and stacking decoder LLM outputs with traditional model outputs leaves flow performance unchanged. The picture is more nuanced where the LLM has signal: routing and stacking can improve weaker models, and strong feature representations can make smaller decoder models competitive with larger frontier LLMs. Still, these findings suggest that practitioners building cybersecurity classification systems with sufficiently large, well-labeled datasets should evaluate traditional ML and encoder-based classification methods before adopting decoder LLMs or hybrid LLM ensembles.
+\end{abstract}
+
+\begin{keywords}
+LLMs for security, intrusion detection, phishing detection, ensembles, feature
+representation, fine-tuning, AUCPR.
+\end{keywords}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Large Language Models (LLMs) are easy to deploy, pre-trained on large amounts of data, and require no task-specific training to produce a first result. Naturally, stakeholders begin to ask: \textbf{why spend money training traditional Machine Learning (ML) models when an LLM is already available?} Specifically, in security
+applications, where missing an incident is costly and false positives drown analysts, a similar question
+may come up: if LLMs are so capable, why retain the classical ML detection stack at all? This paper
+addresses that question empirically with rigorous experiments and LLM-ML synergy solutions. Its short answer has two parts: \textbf{an LLM can engage with security data only when the input representation is semantically meaningful, and even then, strong traditional ML and encoder-based models can match or beat it.} More subtle questions arise from that answer, such as: \textit{what about tabular data?} \textit{how do numerical features affect performance?} \textit{can embeddings improve results?} \textit{is an LLM decoder model worth the cost and latency for classification?} We explore all of these questions in this paper.
+
+% There is a battle between traditional ML that is known about its predictive properties, learning clear decision boundaries, and LLMs, trained on large amounts of data that are known for generating text. LLMs can be prompted to classify, but they are not designed to learn the decision boundary between them. On the other hand, traditional ML models cannot generate new samples from a distribution. This fundamental difference in design and purpose leads to different strengths and weaknesses in classification tasks.
+
+Traditional ML offers mature, well-understood classifiers, but it has not resolved the base-rate
+fallacy of intrusion detection, where genuine intrusions are extremely rare relative to benign traffic, and even a detector with a very low false-positive rate will produce far more false alarms than true detections, making its alerts unreliable despite high accuracy. Traditional ML models also require continuous retraining to keep up with an evolving threat landscape, and their results are difficult to interpret. LLMs appear to address some of these issues: they can be prompted zero-shot, fine-tuned on a specific text domain, and designed to justify a decision in natural language. However, they bring their own costs: large fine-tuning data requirements, API latency, high memory usage, cost per inference, and a tendency to behave unpredictably on inputs far from their training distribution. 
+
+In this paper, we investigate the performance of LLMs in security application for intrusion detection and compare it to traditional ML models. We find that while LLMs are powerful, they are not always the best choice for classification tasks, and that traditional ML models can still outperform LLMs in certain scenarios. We use two diametrically different dataset groups, one natural language dataset, i.e., phishing emails, and a group of tabular, numerical datasets, i.e., network traffic. The goal is to experiment with a dataset that is intuitive for LLMs and a dataset that is challenging. We explore numerical features and embeddings, as well as conversions of tabular data to natural language, to understand the performance of LLMs in different scenarios. Three of our tabular network datasets are produced from the \textit{same} Mirai-botnet capture \citep{mirsky2018kitsune}
+at three aggregation levels, giving a controlled natural experiment: identical traffic and labels, different representations. This design
+lets us attribute differences in LLM performance to \textit{feature semantics} rather than to the difficulty
+of the detection task or the lack of natural language descriptions. Furthermore, we explore the synergy between LLMs and traditional ML models, proposing two ensemble architectures that combine the strengths of both approaches: the router \citep{jacobs1991adaptive,ong2024routellm} and the meta learner \citep{wolpert1992stacked}.
+
+The main contributions of this work are:
+\begin{enumerate}
+\item \textbf{A controlled, multi-representation comparison.} We isolate feature representation as the
+   variable governing LLM classification ability, using one phishing-text dataset \citep{liu2023phishing}, three aggregation
+   levels of a single Mirai capture \citep{mirsky2018kitsune}, and CIC-IDS2017 \citep{sharafaldin2018cicids}.
+\item \textbf{An evaluation discipline that prevents false positives in the \emph{methodology}.} Every AUCPR \citep{davis2006relationship} is
+   read against the dataset class prior, and per-packet data is split flow-aware (grouping by a
+   5-tuple) so that no flow appears in both train and test. This discipline is decisive: under a
+   random per-packet split the ${\sim}0.84$ prior alone hands an at-chance LLM an AUCPR of $0.84$, so a
+   high prior or a leaky split can each manufacture an illusory ``LLMs work'' result.
+\item \textbf{Router and Meta Learner ML-LLM ensembles}, with an explicit characterization of when routing
+   improves cost/quality and when it only hurts, and when stacking adds accuracy versus merely down-weighting the LLM.
+\item \textbf{Evidence that learned representations, not prompting, are the lever for non-language features}: frozen encoder embeddings recover much of the signal in serialized flow statistics that no zero-shot LLM can read ($0.74$ from a $0.40$ prior), fine-tuning nearly all of it ($0.83$), yet it ties rather than beats traditional ML XGBoost ($0.845$).
+\end{enumerate}
+
+% [EXTENSION 2026: motivation begins]
+We extend the original representation-focused comparison in two directions. First, we test generalization on new captures with splits that hold out captures, designated host groups, flows, or time ranges according to the selected policy: the CTU-13 botnet captures \citep{garcia2014empirical} evaluated at their observed prevalence with the false-positive burden reported in operator units, and a second Kitsune capture (SYN DoS) used for cross-capture transfer. Second, we re-examine phishing detection operationally on a multi-source public-corpus panel, decomposing false positives by subtype (ham versus bulk spam) and testing whether hard-negative training changes the operational picture.
+% [EXTENSION 2026: motivation ends]
+
+This paper is organized as follows: Section \ref{sec:methodology} reviews the datasets, model decisions, and evaluation metrics; Section \ref{sec:results} presents our experimental results; Section \ref{sec:discussion} draws practical conclusions for feature engineering and model choice; Section \ref{sec:related-work} reviews related work; we conclude in Section \ref{sec:conclusion}.
+\begin{table}[t]
+\floatconts
+  {tab:datasets}%
+  {\caption{Datasets used in the study, spanning one natural-language task and six
+    network-intrusion datasets or representations. The three Kitsune-Mirai datasets derive from the same
+    raw packet capture at three aggregation levels. AUCPR must be read against the class prior.}}
+  {\footnotesize
+  \begin{tabular}{@{}p{2.3cm}lp{2.0cm}p{2.6cm}p{1.9cm}p{2.8cm}@{}}
+    \toprule
+    \textbf{Dataset} & \textbf{Domain} & \textbf{Size (total)} & \textbf{Train / Test}
+      & \textbf{Test prior} & \textbf{Feature type} \\
+    \midrule
+    \texttt{zefang-liu} (Phishing Email) & Phishing & $17{,}537$ & $14{,}029$ / $3{,}508$ & $37.4\%$
+      & Natural language (email text) \\
+    \addlinespace
+    Kitsune-Mirai AfterImage & Network & $764{,}136$ & $611{,}308$ / $152{,}828$ & ${\sim}84\%$
+      & $115$ abstract statistical aggregates \\
+    \addlinespace
+    CIC-IDS2017 & Network & ${\sim}2.5$M ($5$K sampled) & $4{,}000$ / $1{,}000$ & $17.2\%$
+      & $78$ named flow statistics \\
+    \addlinespace
+    Kitsune-Mirai pcap (per-packet) & Network & $764{,}137$ packets ($5$K sampled)
+      & random $4{,}000$ / $1{,}000$; flow-aware $4{,}709$ / $291$ & ${\sim}84\%$ (random) / ${\sim}42.6\%$ (flow-aware)
+      & $12$ named per-packet fields \\
+    \addlinespace
+    Kitsune-Mirai pcap (flows) & Network & $36{,}611$ flows & $29{,}288$ / $7{,}323$ & $40.3\%$
+      & $16$ aggregated flow statistics \\
+    \addlinespace
+    % [EXTENSION 2026: new datasets]
+    CTU-13 \citep{garcia2014empirical} & Network & $19.98$M flows & scenario-disjoint: $2$M sampled of $9.74$M / all $10.23$M & $2.5\%$ (observed)
+      & $14$ NetFlow fields \\
+    \addlinespace
+    Kitsune SYN DoS & Network & $2{,}771{,}276$ packets & cross-capture: all Mirai / all SYN DoS & $0.25\%$ (observed)
+      & $12$ named per-packet fields \\
+    \addlinespace
+    Phishing panel (8 sources) & Phishing & $43{,}365$ deduped & grouped $26{,}012$ / $8{,}560$ / $8{,}793$; $6$ external bundles & $22.9\%$ (curated)
+      & Natural language (email text) \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+\section{Methodology}
+\label{sec:methodology}
+Our goal is classification of malicious vs benign signal in security datasets, using LLMs and traditional ML models across a variety of datasets and feature representations. This section describes our philosophy of dataset selection, feature generation, model choice, and metrics.
+% [LAYOUT] Block top floats from landing on the current (still-filling) page, so the
+% datasets table below is deferred to the next page rather than jumping backward onto
+% this one -- keeps it on the same page as this subsection without forcing a \clearpage.
+%\suppressfloats[t]
+%\clearpage
+\subsection{Datasets and feature representations}
+\label{sec:datasets-and-features}
+
+We start with the datasets and their feature representations. We use two types of datasets: one natural language dataset, and a group of tabular datasets. The natural language dataset is a phishing email dataset \citep{liu2023phishing}, which contains emails labeled as either phishing or benign. The tabular datasets are derived from a Mirai botnet capture \citep{mirsky2018kitsune}, which contains network traffic labeled as either malicious or benign. We create three different representations of the Mirai dataset: raw packets, flow statistics, and incremental statistics (referred to as AfterImage). We also use the CIC-IDS2017 dataset \citep{sharafaldin2018cicids}, which contains network flow traffic labeled as either malicious or benign with numerical feature representations of the flows, such as duration, packet length and flags. Table~\ref{tab:datasets} summarizes the datasets used in this study, including their domain, size, train/test split when these datasets are used to train or fine-tune, test prior, and feature type.  The prior (class prior or base rate) is the fraction of the test set belonging to the positive (malicious) class. Although the three Kitsune-Mirai representations derive from the same capture, their priors differ because the unit of aggregation changes: Mirai's high-volume floods generate many packets per flow, so counting individual packets without regard to flow membership (AfterImage) inflates the positive-class share to ${\sim}84\%$; a random per-packet split inflates it almost as much (${\sim}84\%$), but the flow-aware split used throughout this paper keeps whole flows together and brings the per-packet prior down to $42.6\%$, close to the $40.3\%$ obtained by counting aggregated 5-tuple flows directly.
+
+The feature types vary across the datasets. The phishing email dataset uses natural language features (the email text), converted to a numerical format using the general descriptive feature set of \citet{cohen2018email}\footnote{Code available at: [anonymized for review].}, or to embeddings using frozen ModernBERT \citep{warner2024modernbert}. On the other hand, the network datasets use various forms of tabular data, including abstract statistical aggregates, named flow statistics, and named per-packet fields. The flows are aggregated using the tuple \textit{(src\_ip, dst\_ip, src\_port, dst\_port, protocol)}. Statistics are incremental and generated from these flows.
+
+\subsection{Models and configurations}
+\label{sec:models-and-training}
+
+Our choice of ML model is XGBoost \citep{chen2016xgboost} (hereafter XGB), a characteristic, high performant model that is representative of traditional ML for intrusion detection. Our choices of LLMs aim to cover the spectrum of small/large models, reasoning/non reasoning, encoder vs decoder. Specifically, we distinguish three families: \emph{traditional ML} (XGBoost/XGB), \emph{encoder models} (ModernBERT, frozen or fine-tuned), and \emph{decoder LLMs} (generative models prompted zero-shot); our central negative claims concern the decoders. The list of models used in this study includes:
+\begin{itemize}
+\item \textbf{XGBoost (XGB)} \citep{chen2016xgboost}: a traditional ML model that is trained on the phishing email dataset with numerical, handcrafted features and the network datasets. It is used as a baseline for comparison with the LLMs. It is also the gate model in the Router ensemble, where it makes predictions and if the confidence is low, the input is routed to the LLM for further analysis. In the Meta-Learner ensemble, it serves as a base model whose predictions are combined with the LLM's outputs by a second-stage model.
+\item \textbf{XGBoost on frozen ModernBERT}: a traditional ML model that is trained on the phishing email dataset using embeddings generated by a frozen ModernBERT model. This allows us to evaluate the performance of XGBoost when it is given a more powerful feature representation derived from an encoder. Specifically this configuration can be considered a type of an ``LLM+ML ensemble'' where the encoder is used to generate features for the ML model, but the ML model is still responsible for making the final prediction. In this paper, we consider this to be a case of feature engineering. This configuration also serves as the gate in the Router+BERT ensemble and as a base model in the Meta-Learner. Concretely, the frozen ModernBERT-base encoder (\texttt{answerdotai/ModernBERT-base}) is loaded as a plain masked-language-model backbone with \emph{no} classification head and \emph{no} gradient updates: each input string is tokenized (max length $512$) and passed through the encoder, and we mean-pool the last hidden state across tokens to obtain a single embedding vector per record. XGBoost is then trained on these frozen embeddings exactly as it would be on hand-crafted features.
+\item \textbf{ModernBERT (fine-tuned)}: an encoder-only model that is fine-tuned end-to-end on the phishing email dataset and the network datasets, with a linear classification head (\texttt{AutoModelForSequenceClassification}, 2-way softmax) attached on top of the pooled encoder output and trained with cross-entropy loss. Unlike the frozen configuration above, this model performs the classification itself rather than only supplying features to XGBoost. On phishing, we fully fine-tune all $149$M parameters ($3$ epochs, batch size $16$, learning rate $2\times10^{-5}$, max sequence length $512$). On the network flow dataset, which is smaller and class-imbalanced, we instead fine-tune with LoRA (rank $r=8$, $\alpha=16$, dropout $0.05$, adapting the attention $W_{qkv}$ and $W_o$ projections) and a class-weighted cross-entropy loss ($3$ epochs, batch size $32$, learning rate $2\times10^{-4}$, max sequence length $128$), where the positive-class weight is set to the inverse of the training-set class ratio. This allows us to evaluate the performance of the encoder when it has been specifically trained on the task at hand, and to compare it with the frozen-embedding version above to understand the impact of task-specific fine-tuning (and a classification head) versus using the encoder purely as a fixed feature extractor.
+\item \textbf{Open source LLMs (zero-shot)}: we also evaluate the performance of open-source LLMs in a zero-shot setting on the same datasets. This allows us to compare the performance of different LLM architectures and understand if the results are consistent across different models. We used reasoning LLMs such as GPT-OSS \citep{openai2025gptoss} and Mistral-7B-Instruct \citep{jiang2023mistral}, which are designed to perform well on problem solving tasks, as well as non-reasoning LLMs such as Gemma3:12B \citep{gemmateam2025gemma3} and Llama3.2 \citep{llamateam2024herd}.
+\item \textbf{Llama3.2 (fine-tuned)}: a decoder counterpart to the ModernBERT fine-tuning above. We LoRA-adapt Llama3.2-3B (rank $r=8$, $\alpha=16$, attention projections only) with a sequence-classification head, using the same training pipeline and data splits as the corresponding zero-shot and ModernBERT-FT runs.
+\item \textbf{Claude Sonnet 4.6} \citep{anthropic2026claude} and \textbf{Gemini 3.1 Pro} \citep{google2026gemini}: two large frontier models, both trained on internet-scale data with the knowledge that they may have had leakage, especially in the phishing dataset.
+\end{itemize}
+
+% [SHORTENED] Mindmap taxonomy figure commented out to save space: it is a visual
+% restatement of the model bullet list directly above. Restore by removing the
+% \iffalse ... \fi wrapper.
+\iffalse
+Figure~\ref{fig:model-config-mindmap} provides a visual taxonomy of the models and configurations evaluated in this study, showing the different branches for traditional ML, standalone LLMs, and ML+LLM ensembles. Each branch contains the specific models and configurations used in our experiments, allowing us to compare their performance across different datasets and feature representations.
+
+\begin{figure}[htbp]
+\floatconts
+  {fig:model-config-mindmap}%
+  {\caption{Taxonomy of the models and configurations evaluated in this study. The four open decoder LLMs (zero-shot) are Mistral, Gemma3:12B, GPT-OSS, and Llama3.2. Each decoder LLM is also evaluated inside both the Router and Router+BERT ensembles; ModernBERT-FT additionally serves as a Router escalation tier.}}%
+  {\resizebox{\columnwidth}{!}{%
+  \begin{forest}
+    for tree={
+      grow'=0,
+      parent anchor=east, child anchor=west, anchor=west,
+      font=\footnotesize,
+      l sep=20pt, s sep=3pt,
+      edge={semithick, gray!55},
+      edge path={\noexpand\path[\forestoption{edge}] (!u.parent anchor) .. controls +(east:1.2em) and +(west:1.2em) .. (.child anchor)\forestoption{edge label};},
+    }
+    [{Models \& Configurations}, font=\small\bfseries
+      [{Traditional ML}, for tree={edge={semithick, blue!60}, text=blue!50!black}
+        [{XGBoost (hand-crafted)}]
+        rai[{XGBoost (frozen BERT embeddings)}]
+      ]
+      [{LLM standalone}, for tree={edge={semithick, green!55!black}, text=green!40!black}
+        [{ModernBERT zero-shot}]
+        [{ModernBERT fine-tuned (LoRA $r{=}8$)}]
+        [{Open decoders ($\times 4$)}]
+        [{Claude Sonnet 4.6 (frontier)}]
+      ]
+      [{ML\,+\,LLM ensembles}, for tree={edge={semithick, red!60}, text=red!55!black}
+        [{Router (XGB gate, $\tau{=}0.7$)}]
+        [{Router+BERT (embedding gate)}]
+        [{Meta-Learner (LogReg)}]
+      ]
+    ]
+  \end{forest}}}
+\end{figure}
+\fi
+% [SHORTENED] end of commented-out mindmap figure.
+\begin{figure}[htb]
+\floatconts
+  {fig:ensemble_architecture}%
+  {\caption{ML-LLM ensemble architectures used in this paper: the Router (top) escalates from the ML gate model to the LLM only when confidence is low, prioritizing efficiency; the Meta-Learner (bottom) runs the ML models and the LLM in parallel and combines their outputs with a weighted combiner, prioritizing accuracy.}}%
+  {%
+    \subfigure[Router]{\includegraphics[width=0.47\linewidth]{figures/router}}\hfill
+    \subfigure[Meta-Learner]{\includegraphics[width=0.47\linewidth]{figures/meta-learner}}%
+  }
+\end{figure}
+\FloatBarrier
+\subsection{ML-LLM Ensemble Architectures}
+\label{sec:ensemble-architectures}
+
+Figure \ref{fig:ensemble_architecture} shows the ML-LLM ensemble architectures used in this paper:
+\begin{itemize}
+\item \textbf{Router}: The purpose of this architecture is to route inference to one or another model based on confidence. Usually, tier 1 is the ML model that infers a class initially and if its confidence is low, then it routes to an LLM. This architecture prioritizes efficiency.
+\item \textbf{Meta Learner}: In this case, both models make predictions independently in parallel. A ``Meta-Learner'' model (usually Logistic Regression) weighs their outputs to make the final call. This pattern prioritizes accuracy.
+\end{itemize}
+
+\subsection{Prompting and leakage control}
+\label{sec:prompting-and-leakage-control}
+
+We purposefully use a simple, zero-shot prompt for all LLMs and datasets, to avoid overfitting the prompt to a particular model or dataset. The prompt is designed to be straightforward and consistent across all evaluations, allowing us to compare the performance of different LLMs on the same footing. The LLMs are expected to analyze the input and provide a prediction along with a confidence score. Both detection tasks share the same prompt template, shown in Figure~\ref{fig:prompt-template}, with only the domain-specific noun, record label, and class names substituted. For temperature, the four open-source decoders (Mistral, Gemma3:12B, Llama3.2, GPT-OSS), served locally via Ollama, are queried at temperature $0.1$ to keep their zero-shot verdicts close to deterministic; Claude Sonnet 4.6 is called through the standard Anthropic Messages API with no temperature override, i.e., at the API's default sampling temperature. We did not tune temperature as a hyperparameter for any model.
+
+\begin{promptbox}{Prompt: phishing / network intrusion detection (shared template)}
+Analyze the following [DOMAIN].
+
+[LABEL]:
+---
+{text}
+---
+
+Respond with ONLY a JSON object in this exact format:
+{{"prediction": 0 or 1, "confidence": 0.0 to 1.0}}
+
+Where:
+- prediction: 1 for [POS_LABEL], 0 for [NEG_LABEL]
+- confidence: your confidence level (0.0 to 1.0)
+
+JSON response:
+\end{promptbox}
+\captionof{figure}{Shared zero-shot prompt template for both detection tasks; only the bracketed slots change by domain. Phishing: \texttt{[DOMAIN]} = ``email/message and determine if it is a phishing attempt or legitimate'', \texttt{[LABEL]} = ``Message'', \texttt{[POS\_LABEL]/[NEG\_LABEL]} = ``phishing''/``legitimate''. Network intrusion: \texttt{[DOMAIN]} = ``network flow record and determine if it represents an attack or benign traffic'', \texttt{[LABEL]} = ``Flow'', \texttt{[POS\_LABEL]/[NEG\_LABEL]} = ``attack/malicious''/``benign''. At inference time \texttt{\{text\}} is replaced by the email body or the serialized flow/packet record, and the model returns a JSON verdict with a confidence used as the ranking score.}
+\label{fig:prompt-template}
+
+For the phishing dataset no feature engineering is applied: the \texttt{\{text\}} slot is simply the raw email body (likewise truncated to $1000$ characters). For the tabular network datasets the LLM never sees a raw numeric vector. Instead, each row is serialized into a short, human-readable record that fills the \texttt{\{text\}} slot of the prompt, and \emph{every value is labeled with its feature (column) name} so the model knows what each number represents. We adopt two complementary serialization styles: a natural-language sentence (a TabLLM-style serialization \citep{hegselmann2023tabllm}) for zero-shot prompting, and a compact \texttt{key=value} record for the fine-tuned encoder, whose serialization must match its training format exactly, using the natural-language form at inference time instead collapses its AUCPR to chance.
+
+Rather than dumping every column, we curate a small, interpretable subset per dataset so the record stays focused and within the input budget (text is truncated to $1000$ characters). For CIC-IDS2017 we include the destination port, flow duration, forward and backward packet and byte counts, inter-arrival mean and standard deviation, mean packet length, and the SYN/ACK/FIN/RST flag counts. For the $115$-feature AfterImage representation we keep a fixed positional subset of twelve columns rather than all $115$.\footnote{Per-column semantics for this positional indexing are published at: [TODO: add GitHub link].} For the per-packet and flow representations we include the protocol, source and destination ports, packet length(s), TTL, inter-arrival time, and TCP flags; flag fields are emitted only for TCP records. 
+
+Crucially, we enrich every port number with its well-known service name, rendering it as \texttt{port(Service)} whenever recognized, ex. $22$(SSH), $23$(Telnet), $80$(HTTP), $443$(HTTPS). This injects domain priors the model already holds from pre-training: Telnet (port $23$), for instance, is the primary infection vector of the Mirai botnet, a cue that the bare integer ``$23$'' would not convey. One caveat: at the flow level the Mirai-C2 annotation is a near-perfect label proxy (all $13$ of $36{,}611$ flows touching port $10240$ are attacks), though it touches too few rows (${\sim}0.04\%$) to move the reported AUCPR. Figure~\ref{fig:example-record} shows the same flow rendered in both serialization styles.
+
+\begin{promptbox}{Example: serialized Mirai flow record (fills the \{text\} slot)}
+# Zero-shot, natural-language (TabLLM-style) serialization:
+A TCP flow from port 49827 to port 23(Telnet), with 5 packets totaling
+320 bytes over 12.4 ms (mean inter-arrival 2.50 ms, std 0.80 ms; mean
+packet size 64 bytes). TCP flags observed: SYN=3, ACK=1, FIN=0, RST=0, PSH=1.
+
+# Fine-tuned encoder, compact key=value serialization:
+Network flow: proto=TCP, src=49827, dst=23(Telnet), pkts=5, bytes=320,
+duration_ms=12.4, mean_iat_ms=2.50, std_iat_ms=0.80, mean_pkt_len=64.0,
+flags=[SYN:3 ACK:1 FIN:0 RST:0]
+\end{promptbox}
+\captionof{figure}{The same Mirai flow serialized for the \texttt{\{text\}} slot in both styles: a natural-language sentence used for zero-shot prompting, and the compact \texttt{key=value} record used to fine-tune the encoder. Feature (column) names label every value, and recognized ports are annotated with their service (here \texttt{23(Telnet)}, the Mirai infection vector).}
+\label{fig:example-record}
+
+Text and aggregate datasets use an $80/20$ split stratified by label (seed $42$). Per-packet data requires more care: thousands of near-identical packets share a 5-tuple, for example a denial of service attack of a scan can have near identical packets that can leak information from training to testing. Therefore, a random per-packet split leaks almost-duplicate rows across train and test. To this end, we split per-packet data with a \textbf{flow-aware group/shuffle/split function on the 5-tuple \texttt{flow\_id}}, guaranteeing that every packet of a flow lands wholly in train or wholly in test. This is essential: without it, a memorization shortcut inflates the tabular baseline and a high packet-level prior flatters the LLMs, jointly producing a spurious ``per-packet LLMs work'' result.
+
+\subsection{Evaluation metrics}
+\label{sec:evaluation-metrics}
+
+The metrics of choice are AUCPR \citep{davis2006relationship}, precision, and recall, standard for evaluating classification on imbalanced datasets. AUCPR is particularly important in security applications with significant class imbalance, providing a more informative measure than accuracy: it captures the trade-off between precision (how many flagged instances are truly positive) and recall (how many true positives are caught) across thresholds, so it directly reflects how well a model identifies the rare positive class. 
+
+We interpret AUCPR relative to the class prior, since a random classifier achieves an AUCPR equal to the positive class fraction; this baseline ensures we measure genuine performance rather than being misled by the class imbalance. LLM decisions are converted to a ranking score $P(\mathrm{attack})$ so that AUCPR measures ranking quality rather than thresholded accuracy. To bound API cost, Claude is evaluated on a \emph{proportionally stratified} subsample that preserves the full-test class prior, keeping its AUCPR baseline directly comparable to the other models'.
+
+All results use a single seed ($42$); we quantify uncertainty with test-set bootstrap $95\%$ CIs ($2{,}000$ resamples, Table~\ref{tab:precision-recall}), and the ML-vs-LLM gaps rest on non-overlapping intervals. Multi-seed replication is future work. In addition to AUCPR, we present selectively the precision and recall to demonstrate that for specific thresholds the LLM predictions show degeneracy and either predict everything as benign ($\mathrm{Recall} = 0$) or everything as malicious ($\mathrm{FPR} = 1$, precision collapsing to the class prior).
+
+% [EXTENSION 2026: methodology begins]
+\subsection{New captures, split policies, and operational metrics}
+\label{sec:extension-methodology}
+
+To test generalization beyond single-capture evaluation, we add two network datasets (Table~\ref{tab:datasets}). CTU-13 \citep{garcia2014empirical} comprises thirteen botnet captures recorded on a live university network; we treat its unverified Background traffic as negative, so the observed $2.2\%$ Botnet prevalence is measured against noisy negative labels. We evaluate under four split policies: \emph{scenario-disjoint} (whole captures held out following \citet{garcia2014empirical}: scenarios $1, 2, 6, 8, 9$ test, the rest train), \emph{host-grouped} (grouping by the internal network endpoint; $99.8\%$ of test flows still share some endpoint with training, so this policy is grouped rather than host-disjoint), a single global \emph{temporal} cutoff, and the leakage-prone random reference. Training may be uniformly subsampled; XGBoost scores the complete held-out test set, while the expensive models (TabPFN, frozen-embedding pipelines) score uniform $300$K test samples with the per-hour burden scaled by the sampled exposure. The second dataset is the Kitsune SYN DoS capture, which shares the Mirai testbed and per-packet schema, enabling a controlled cross-capture transfer test (train on one complete capture, test on the other).
+
+For phishing we assemble an eight-source panel from the Nazario phishing corpus \citep{nazario2005phishing} (two collection eras), the SpamAssassin public corpus \citep{spamassassin2003corpus} (five partitions), and a deterministic $30$K-message Enron sample \citep{klimt2004enron}: $48{,}056$ messages, $43{,}365$ after global exact deduplication, each labeled by subtype (phishing, ham, or bulk spam; the panel contains no verified scam/fraud source). Campaign/template groups never cross the group-aware train, calibration, and test partitions, and six external bundles additionally hold out complete source partitions; because all phishing sources share the Nazario family and all spam sources the SpamAssassin family, external evaluation tests held-out source partitions and collection eras rather than fully unseen corpus families. We report subtype-conditional false-positive rates with Wilson intervals and a campaign-group bootstrap, select thresholds on calibration predictions only, and project precision to hypothetical priors from class-conditional rates (bulk-spam-only mixtures; no test rows are resampled). A hard-negative intervention varies only the training negatives: condition A uses ham only; B keeps the negative budget fixed and swaps $1{,}057$ of $19{,}148$ negatives ($5.5\%$, all available spam) from ham to bulk spam; C adds all spam on top of all ham. Each condition trains a fresh model per split, including a full fine-tune of ModernBERT-base with epoch selection on the calibration partition.
+% [EXTENSION 2026: methodology ends]
+
+\section{Results}
+\label{sec:results}
+
+We present a large spectrum of results that we separated by dataset type, phishing vs network, then we describe fine tuning improvements made to LLMs, and consequently explore the synergy between ML and LLMs with the ensemble architectures router and meta-learner. We then present a data ablation study related to how much data is enough for a traditional ML model, to make the point of cost tradeoffs between ML and LLMs. Finally, we report the extension results: generalization and operational burden on new captures, and the operational robustness of phishing detectors.
+\begin{figure}[t]
+\floatconts
+  {fig:res-phishing}%
+  {\caption{Phishing email detection: AUCPR for every configuration (prior $0.374$). Zero-shot Claude ($0.970$) trails the frozen-embedding pipeline ($0.991$) and fine-tuned ModernBERT ($0.998$).}}%
+  {\includegraphics[width=0.8\columnwidth]{figures/fig_phishing}}
+\end{figure}
+\subsection{Phishing email detection}
+\label{sec:phishing-email-detection}
+
+\noindent Figure~\ref{fig:res-phishing} shows the results for phishing email detection. Recall that a random, no-skill classifier achieves an expected AUCPR equal to the positive-class prior, which serves as the baseline for evaluating our models.
+
+As expected, the frontier models Claude Sonnet 4.6 and Gemini 3.1 Pro, both trained on the whole internet, will have seen a significant portion of the phishing dataset, therefore their strong performance is not surprising. We thus read the zero-shot decoder phishing numbers as a contamination-inflated upper bound, which only strengthens our thesis: ML and encoder methods still match or beat them. More interesting is that even zero-shot Claude performs strongly ($0.970$), within $0.03$ of the fine-tuned ModernBERT, suggesting it has learned the language patterns associated with phishing emails; zero-shot Gemini follows the same pattern ($0.990$ standalone, $0.999$ behind the embedding gate). ModernBERT FT in turn outperforms XGBoost, capturing nuances the traditional ML model may miss, and XGB with embeddings, also performs well, indicating that LLM-generated embeddings can enhance a traditional ML model. Fine-tuning a decoder shows the same ceiling effect: LoRA-adapted Llama3.2 reaches $0.999$ AUCPR standalone, matching fine-tuned ModernBERT.
+
+The router lifts every base model, demonstrating synergy between traditional ML and LLMs. Specifically, Mistral is the lowest performing zero-shot LLM ($0.676$), but behind the embedding gate it reaches $0.982$, nearly matching gated Claude ($0.993$; note standalone zero-shot Claude is $0.970$), a strong result for a much smaller model. Even smaller LLMs can thus be effective when paired with traditional ML and appropriate routing and feature engineering strategies.
+
+In the meta-learner, a second-stage model (logistic regression or a small gradient-boosted tree) is trained on out-of-fold predictions from the base classifiers and every decoder LLM (phishing stacks summarized below; network flow stacks in Table~\ref{tab:meta-flows}), the most generous setting for the LLM: nothing is gated away and the combiner may rely on it as heavily as the data justify.
+
+On phishing, stacking is genuinely useful when the base is weak. Combining hand-crafted XGBoost ($0.916$ AUCPR) with any decoder LLM lifts AUCPR to between $0.95$ and $0.98$, even though the decoders vary widely on their own, from Mistral ($0.676$) to GPT-OSS ($0.900$). Adding frozen ModernBERT embeddings to the stack reaches the ceiling, with the best configuration (XGBoost with BERT embeddings and Claude) attaining $0.998$. The lift over the base, however, does not come from the decoder LLM. The same XGBoost-plus-BERT stack with no LLM already scores $0.991$, fine-tuned ModernBERT alone scores $0.998$ (Section~\ref{sec:fine-tuning-encoder}). The decoder LLM adds at most a few thousandths on top of a strong embedding base, and the best stack ($0.998$) exactly ties the fine-tuned encoder.
+
+\subsection{Network intrusion detection}
+\label{sec:network-intrusion-detection}
+
+\begin{figure}[htb]
+\floatconts
+  {fig:res-network}%
+  {\caption{Network intrusion detection: XGBoost vs.\ the best zero-shot LLM, read against the class prior (dashed). Every zero-shot LLM lands at or near chance; XGBoost is strong except on the leakage-free per-packet split.}}%
+  {\includegraphics[width=0.75\columnwidth]{figures/fig_network}}
+\end{figure}
+\FloatBarrier
+
+\input{precision_recall}
+
+\input{meta_learner_tables_xenia}
+\noindent Figure~\ref{fig:res-network} shows the results for network intrusion detection. These results tell a different story than phishing: every zero-shot LLM is at or near the prior, i.e., effectively guessing randomly, suggesting that decoder LLMs struggle with tabular feature representations. Reviewing each model at its decision threshold (Table~\ref{tab:precision-recall}) makes the failure concrete: the collapse is not weak ranking but \emph{constant prediction}. On AfterImage ($115$ abstract statistics, prior $0.84$) every zero-shot LLM either predicts benign for all traffic ($\mathrm{recall}=0.000$, missing every attack) or attack for all of it ($\mathrm{FPR}=1.000$), while XGBoost's ranking is near-perfect ($1.000$ AUCPR). AfterImage's incremental, decay-windowed features \citep{mirsky2018kitsune} make a random split a weak leakage guard, so we re-ran XGBoost under a chronological, temporally-ordered per-class split (training on earlier traffic, testing on later) that removes this leakage; its ranking remained near-perfect (AUCPR still ${\approx}1.0$), confirming the result is not a split artifact, though FPR rises to $0.637$ at the default threshold. XGBoost is also trained on more raw columns than the LLMs see ($78$ or $115$ versus the curated dozen). Therefore, we re-trained XGBoost restricted to that same curated subset for both datasets (Table~\ref{tab:precision-recall}, \texttt{XGBoost (curated)}). Note that the AUCPR drops negligibly on CIC-IDS2017 ($0.992\!\to\!0.989$, within the full model's bootstrap CI) and by only $0.004$ on AfterImage ($1.000\!\to\!0.996$), confirming the gap to any zero-shot LLM is not primarily a removed-information artifact. The pattern repeats on CIC-IDS2017, flows, and per-packet: with one exception, no LLM's bootstrap AUCPR interval clears the class prior, whereas XGBoost's lies far above it; the exception, GPT-OSS on CIC-IDS2017 ($0.258$ $[0.213, 0.313]$, prior $0.172$), clears the prior yet remains far below XGBoost ($0.992$); at the other extreme, Mistral on CIC-IDS2017 ($0.142$ $[0.123, 0.165]$) falls significantly \emph{below} the prior, i.e., worse than random guessing. The least-aggregated per-packet representation is the closest the LLMs come, yet even the best of them (Gemma3 $0.461$) has a $95\%$ confidence interval $[0.391, 0.533]$ that still contains the prior $0.426$. A second frontier model, zero-shot Gemini 3.1 Pro, follows the same pattern on flows: AUCPR $0.373$, below the $0.403$ prior.
+
+% Why does XGBoost perform so well on the network datasets? Its hand-crafted features capture the patterns and relationships in the network data, and the algorithm models complex interactions between them, allowing it to effectively distinguish malicious from benign traffic.
+
+On flows the LLM in the meta learner architecture contributes nothing measurable. Every zero-shot decoder sits at or below the class prior (between $0.39$ and $0.43$ AUCPR against a prior of $0.403$), and stacking one onto XGBoost with a logistic stage-2 leaves the score at the XGBoost base ($0.845$; Table~\ref{tab:meta-flows}); the XGBoost stage-2 combiner instead loses a little ground ($0.821$), consistent with the overfitting noted below. A paired test-set bootstrap with $2{,}000$ resamples of the best LLM stack against the best LLM-free base returns a difference in AUCPR of $-0.000$, with a $95\%$ confidence interval of $[-0.0001, 0.0000]$, i.e., an exact tie. The result holds for every decoder we could evaluate at full cache coverage (Llama3.2, GPT-OSS, Mistral, and Gemma3), so it is not a single-model artifact. This contrasts with routing (Figure~\ref{fig:res-router}): sending the same at-chance LLM a growing share of traffic does not merely fail to help but pushes AUCPR below XGBoost, whereas the logistic stacking combiner leaves the base unchanged.
+
+The fitted coefficients confirm this is by merit, not mis-specification: the logistic combiner weights the LLM in proportion to its signal, giving it between $22$ and $43\%$ of the total on phishing, where the model genuinely reads the email text, but only $1$ to $5\%$ on flows, where it is at chance. A logistic second stage also beats a gradient-boosted one on flows, where the nonlinear combiner overfits out-of-fold noise, while the two agree to within about a percentage point on phishing.
+
+% TODO: reread and reword the following paragraph, it is a bit confusing.
+Thus, in both domains the meta-learner buys accuracy only where a non-LLM base was weak and a stronger non-LLM base was already available, and the decoder LLM is never the component that reaches the ceiling (practical consequences in Section~\ref{sec:llm-ensemble-value}). Three caveats: LLM scores are class-conditioned (unaffected by threshold); Claude's flows stacks fall below the XGBoost base ($0.760$--$0.814$ vs.\ $0.845$). Part of the reason is because it is evaluated on a cost-capped subset, unlike the fully covered open decoders. AfterImage and CIC-IDS2017 are omitted from the stacking tables because every configuration there ties the ceiling (AUCPR $\geq 0.99$, reaching $1.000$ on AfterImage), so a base-vs-stack comparison is not meaningful. Per-packet is also omitted, but for a different reason: on the same leakage-free, flow-aware split used in Table~\ref{tab:precision-recall} (XGBoost base AUCPR $0.697$), stacking a decoder LLM onto XGBoost does \emph{not} reach the ceiling either. The best per-packet stack (XGBoost with a Gemma3 LLM feature, logistic stage-2) reaches AUCPR $0.698$ -- it ties the XGBoost base rather than the ceiling, the same graceful-degradation pattern documented for flows above. An earlier internal per-packet stacking run, used a random per-packet split and its stacks approached AUCPR $\geq 0.99$. This is exactly the kind of leaky-split artifact that Section~\ref{sec:prompting-and-leakage-control} and the flow-aware per-packet result in Table~\ref{tab:precision-recall} are designed to rule out. All figures are single-seed, with test-set bootstrap intervals on the stacks.
+
+\subsection{Fine-tuning}
+\label{sec:fine-tuning-encoder}
+\begin{figure}[htb]
+\floatconts
+  {fig:res-finetune}%
+  {\caption{Learned representations, not prompting, unlock serialized flow statistics: on flows, AUCPR rises from chance (zero-shot $0.41$) through frozen embeddings ($0.74$) to encoder fine-tuning ($0.83$), essentially tying XGBoost ($0.84$); a fine-tuned decoder goes slightly further ($0.86$).}}%
+  {\includegraphics[width=0.75\columnwidth]{figures/fig_finetune}}
+\end{figure}
+\FloatBarrier
+We fine-tune an encoder, ModernBERT, and a representative decoder (Llama3.2), on phishing and network datasets to see if learned representations can extract useful information from tabular data, comparing both against their zero-shot versions and XGBoost across all tasks. We use two fine-tuning regimes for the encoder. On phishing we fully fine-tune ModernBERT-base, updating all $149$M parameters. On the network datasets, which are smaller and class-imbalanced, we use parameter-efficient low-rank adaptation (LoRA, rank $8$) with a class-weighted cross-entropy loss. The decoder is fine-tuned with LoRA (rank $8$) on both tasks. In all cases the fine-tuned model must see the same input format at inference time as during training, i.e., a compact \texttt{key=value} record.
+
+Figure~\ref{fig:res-finetune} compares the phishing and networking best zero-shot LLMs with fine-tuned ModernBERT and the fine-tuned decoder. Fine-tuning moves the needle on the network datasets: on flows, AUCPR rises from chance (zero-shot $0.41$) through frozen embeddings ($0.74$) to encoder fine-tuning ($0.83$), essentially tying XGBoost ($0.84$); on phishing all learned methods are near-ceiling, so the gain from fine-tuning is smaller in absolute terms, but it still lifts AUCPR from $0.97$ to $0.998$, a significant improvement given the already high performance of the zero-shot model. Thus, while zero-shot decoder LLMs struggle with tabular data, a fine-tuned encoder can extract useful information from it.
+
+Two implications follow Figure~\ref{fig:res-finetune}. First, the representation gap on flows is specific to \textit{zero-shot prompting}: the signal is present and learnable, with frozen embeddings recovering much of it and weight updates most of the rest. Second, fine-tuning closes the gap to gradient boosting on flows: the encoder ties it, and, as the decoder result below shows, weight updates can modestly surpass it too.
+
+A LoRA-fine-tuned decoder follows the same trajectory on flows, and slightly further: standalone Llama3.2 reaches $0.855$ AUCPR, modestly exceeding both fine-tuned ModernBERT ($0.833$) and XGBoost ($0.845$).
+
+\subsection{ML-LLM ensembles and the cost/quality trade-off}
+\label{sec:ml-llm-ensembles}
+
+\noindent Figure~\ref{fig:res-router} shows the impact of routing on flow detection. Across multiple thresholds that route higher traffic volumes to the LLM, AUCPR decays monotonically as more traffic is routed to the at-chance LLM, never reaching XGBoost alone ($0.845$). Routing is thus a cost lever rather than an accuracy lever here: it directs only uncertain cases to the LLM but does not improve overall accuracy over XGBoost alone. The same figure plots the meta-learner stack for reference: instead of decaying, it ties the XGBoost base, because stacking degrades gracefully to the base rate when an input carries no signal, while routing actively trades accuracy away as it leans on that input.
+\begin{figure}[htb]
+\floatconts
+  {fig:res-router}%
+  {\caption{Router confidence-threshold sweep on flows: as more traffic is routed to an at-chance LLM, AUCPR decays monotonically and never reaches XGBoost alone ($0.845$); the reference meta-learner stack ties the XGBoost base instead of decaying.}}%
+  {\includegraphics[width=0.78\columnwidth]{figures/fig_router_sweep}}
+\end{figure}
+\FloatBarrier
+Conversely, when the LLM tier has signal, a strong gate makes model choice almost irrelevant. Once a strong embedding gate is used, a small local model (Mistral, $0.982$ behind the gate) nearly matches gated Claude ($0.993$): the AUCPR spread across models collapses from $0.29$ as standalone zero-shot classifiers (Claude $0.970$ down to Mistral $0.676$) to $0.01$ once gated. This suggests that when the LLM provides a strong embedding, the choice of the specific LLM becomes less critical, as even a smaller model carries enough signal for the ML model to perform well.
+
+Thus, ensembles are a powerful tool for managing the cost/quality trade-off, but their impact on accuracy depends on the underlying LLM performance and feature quality: when the LLMs are at chance, routing does not improve accuracy; when they provide strong embeddings, even smaller models perform well.
+
+% [SHORTENED] Gate-collapse figure commented out to save space: it restates the
+% phishing-router result (fig:res-phishing text and the recommendations table).
+% Restore by removing the \iffalse ... \fi wrapper.
+\iffalse
+\begin{figure}[htbp]
+\floatconts
+  {fig:res-gate}%
+  {\caption{A strong gate collapses the frontier-vs-small-model gap: standalone zero-shot AUCPR spans $0.25$ across models, but behind the embedding gate the same models span only $0.03$, and a small local model nearly matches frontier Claude.}}%
+  {\includegraphics[width=\columnwidth]{figures/fig_gate}}
+\end{figure}
+\fi
+
+\subsection{Data volume ablation}
+\label{sec:data-volume-ablation}
+\begin{figure}[htb]
+\floatconts
+  {fig:res-datavol}%
+  {\caption{Data-volume ablation (fixed test set): on phishing, fine-tuning beats hand-crafted XGBoost by $250$ labels and ties zero-shot Claude by $500$; on flows it stays at the prior below $2{,}000$ labels and needs the full set.}}%
+  {\includegraphics[width=0.75\columnwidth]{figures/fig_data_volume}}
+\end{figure}
+\FloatBarrier
+\noindent A general argument for not using traditional ML is the large amount of data required to train a model. In this section, we demonstrate that this is not necessarily a strong argument. Holding the test set fixed and varying only the number of training labels shows that label efficiency itself tracks the representation (Figure~\ref{fig:res-datavol}). Specifically for phishing detection that is language-friendly, fine-tuning beats hand-crafted XGBoost by $250$ labels and ties zero-shot Claude by $500$; for flow detection that is language-unfriendly, the LLMs stay at the prior below $2{,}000$ labels and need the full set to tie XGBoost. Label efficiency thus tracks the representation: language-friendly tasks require far fewer labels to reach strong performance than language-unfriendly ones. Even so, 2K labels is not a large amount of data, and the critical jump in performance demonstrates how performant ML models can be with a small amount of data.
+
+% [EXTENSION 2026: results begin]
+\subsection{Generalization and operational burden on new captures}
+\label{sec:extension-network}
+
+\input{tab_extension_network}
+
+\noindent The scenario-held-out CTU-13 result preserves XGBoost's ranking advantage (AUCPR $0.938$ against an observed prior of $0.025$) but exposes an operational cost hidden by AUCPR alone: at threshold $0.5$, $0.33\%$ of negative flows are false positives, corresponding to approximately $888$ false alerts per capture-hour, and forcing training recall of at least $0.9$ raises this to roughly $14{,}000$ per hour at precision $0.33$ (Table~\ref{tab:ctu-operational}). Under hypothetical priors the fixed-threshold precision projects to $0.73$ at $1\%$ and $0.21$ at $0.1\%$. TabPFN trades recall for a cleaner alert stream ($0.894$ AUCPR), while XGBoost on frozen ModernBERT embeddings transfers poorly across campaigns ($0.422$). The temporal split scores higher ($0.986$) than the scenario split ($0.938$), but its test prior also differs ($7.6\%$ versus $2.5\%$), so we read this as future prediction within known campaigns being easier than facing unseen campaigns rather than as a direct AUCPR comparison. Zero-shot decoders on a cost-capped $1{:}5$ stratified subset of the same test data remain at the subset prior of $0.167$ (Mistral $0.163$, Llama3.2 $0.166$), with Gemma3 showing the same partial signal seen on per-packet Mirai ($0.465$ here, $0.461$ there); routing behind the XGBoost gate simply reproduces the gate ($0.989$ to $0.991$).
+
+Cross-capture transfer is where performance collapses. Within the SYN DoS capture, a flow-grouped split is perfectly separable (AUCPR $1.000$, zero observed false positives among $390{,}681$ negatives, Wilson $95\%$ FPR upper bound $9.8\times 10^{-6}$), driven almost entirely by ACK-flag and source-port features. Training on the complete Mirai capture and testing on the complete SYN DoS capture drops AUCPR to $0.0088$ against a prior of $0.0025$: roughly $3.5\times$ the random baseline, i.e., very weak transfer, with $39\%$ of negative packets flagged at threshold $0.5$. The reverse direction reaches only the prior ($0.843$ vs.\ $0.841$) with recall $0.012$, a reminder that AUCPR must be read jointly with the operating point. A strict temporal split of SYN DoS is untrainable because every attack packet falls in the final burst, leaving no training positives; we report this as a structural property of single-burst captures. The contrast between within-capture and cross-capture evaluation is therefore not evidence that SYN DoS detection is solved; it is evidence that same-capture separability does not guarantee transfer to a different attack capture. Zero-shot decoders (Mistral and Llama3.2 on this experiment) remain near the subset prior in both directions ($0.139$ to $0.172$ against $0.167$).
+
+\subsection{Operational robustness of phishing detectors}
+\label{sec:extension-phishing}
+
+\input{tab_extension_phishing}
+
+\noindent On the controlled phishing split, all three fine-tuned ModernBERT variants exceed $0.998$ AUCPR (Table~\ref{tab:hard-negatives}). This pooled result masks a large difference on hard negatives: trained with ham-only negatives (A), the model flags $11.1\%$ of bulk spam as phishing while its ham FPR is $0.0006$; replacing $5.5\%$ of the fixed negative budget with bulk spam (B) reduces bulk-spam FPR to $0.015$ at unchanged recall ($0.991$), and the additive condition (C) reaches $0.0025$. The same pattern holds for XGBoost ($0.126$ to $0.050$) and for logistic regression on frozen embeddings ($0.275$ to $0.058$), a consistent pattern across the three tested classifier families on this panel. Because bulk spam is only $4.5\%$ of the curated test mix, none of this is visible in pooled AUCPR, which moves by less than $0.001$.
+
+The effect persists on held-out source partitions: across all six external bundles, the fine-tuned model's median bulk-spam FPR falls from $0.112$ (range $0.057$ to $0.573$) under A to $0.053$ ($0.017$ to $0.098$) under B, with C similar ($0.048$). Under a hypothetical deployment mixture of $1\%$ phishing prevalence with half of the non-phishing traffic being bulk spam, the measured conditional rates imply precision rising from $0.152$ (A) to $0.502$ (B) at the fixed threshold ($0.119$ to $0.336$ under conservative componentwise rate bounds); the support diagnostics mark this regime extrapolative given the spam denominators, so we present it as an implication of the measured rates rather than a validated deployment estimate. External difficulty is dominated by source identity: the two bundles whose held-out ham comes from the family-disjoint Enron corpus are the hardest, dropping the ham-only model to $0.849$ and $0.813$ AUCPR with ham FPR $0.24$ and $0.36$ respectively, whereas the external median is $0.987$. Finally, stripping provenance tokens changes controlled performance negligibly ($0.9985$ vs.\ $0.9986$), indicating that shortcut risk is panel-dependent rather than universal.
+% [EXTENSION 2026: results end]
+
+\section{Discussion}
+\label{sec:discussion}
+
+In this section, we address practical research and development questions for using ML and LLMs in security applications.
+
+\subsection{Do decoder LLMs earn their place in an ensemble?}
+\label{sec:llm-ensemble-value}
+
+\noindent On the well-labeled security tasks we study, a text-generating LLM never defines the accuracy frontier, and on cost it is dominated on every architectural axis we can reason about: for every baseline we tried, an LLM-free model, i.e., XGBoost, a frozen-BERT-embedding classifier, or a fine-tuned encoder, matches or beats the LLM-augmented ensemble while being far smaller, locally deployable, and a single forward pass rather than autoregressive generation or a metered API call. The practical implication is that, given a sufficiently large and well-labeled dataset, the right first move is traditional ML with good feature extraction (including embeddings), not a decoder LLM.
+
+The evidence is sharpest where the LLM should do best. On flows the decoder contributes nothing (paired difference $-0.000$, $1$ to $5\%$ stage-2 weight; Section~\ref{sec:network-intrusion-detection}); on phishing, its home turf, the best decoder stack lifts an XGBoost-plus-BERT base from $0.991$ to $0.998$ (single-seed) but only matches LLM-free options (fine-tuned ModernBERT, $0.998$) that are cheaper to serve. The defensible conclusion is domination rather than parity: the LLM can contribute a sliver on text, yet a cheaper non-LLM model always equals or beats it.
+
+These conclusions are scoped to a small set of decently large, well-labeled security datasets and to simple ensembles (confidence routing and out-of-fold stacking). We would expect a decoder LLM to earn its place on tasks that are hard to label or that require multi-step reasoning, for example correlating evidence of a cross-system vulnerability, which is precisely the regime we do not study here. Sections~\ref{sec:extension-network} and~\ref{sec:extension-phishing} extend the comparison to messier settings: campaign-disjoint captures at observed prevalence and a multi-source phishing panel with subtype-level error analysis.
+
+\subsection{Which features are the best?}
+\label{sec:which-features-best} 
+
+Table \ref{tab:feature-type-llm-utility} demonstrates that the results are not as trivial as: "natural language features are best for LLMs, and tabular features are best for traditional ML". Granted, the phishing dataset demonstrates the capability of LLMs to learn the distribution and patterns of language and recognize malicious vs benign emails. However, the network story shows the full spectrum of the LLM and ML capabilities. Even though the afterimage Kitsune dataset has a large variety of features (115 columns), zero-shot LLMs still perform abysmally compared to XGBoost, struggling with aggregated statistics and meta-features that describe time series of network traffic; restricting XGBoost itself to the same curated subset the LLMs see barely moves its AUCPR (Section~\ref{sec:network-intrusion-detection}). This demonstrates that the gap is not simply a matter of the LLM seeing fewer columns. On the other hand, when the features are more raw and closer to the original data, such as in the per-packet and flow representations, zero-shot decoder LLMs still land at chance, but the signal is learnable: on flows, frozen embeddings and fine-tuning recover most of it.
+
+\begin{table}[tbp]
+\centering
+\caption{Feature type vs LLM utility.}
+\label{tab:feature-type-llm-utility}
+\footnotesize
+\begin{tabular}{p{4.0cm}p{2.3cm}p{3.0cm}p{2.3cm}}
+\toprule
+Feature type & Classical-ML quality & Zero-shot LLM utility & LLM via fine-tuning \\
+\midrule
+Abstract statistics (AfterImage)     & Very high        & None (degenerate)   & --                \\
+Named flow statistics (CIC-IDS2017)  & Very high        & None (at chance)    & --                \\
+Aggregated flow statistics (flows)   & High             & None (at chance)    & $\approx$XGB (0.833 vs 0.845)  \\
+Per-packet named fields (flow-aware) & Moderate (0.697) & None (at chance)    & --                \\
+Natural language (email text)        & Moderate         & Strong (0.68--0.97) & Best (0.998)      \\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{table}[tbp]
+\centering
+\caption{Practical recommendations.}
+\label{tab:practical-recommendations}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\footnotesize
+\begin{tabular}{@{}L{0.20\textwidth}L{0.25\textwidth}L{0.46\textwidth}@{}}
+\toprule
+Use case & Recommended approach & Rationale \\
+\midrule
+Phishing email classification &
+ModernBERT-FT, Router+BERT, or zero-shot Claude &
+Quality near-equivalent (0.970--0.998); choose on cost/latency \\
+Phishing without ML infrastructure &
+Zero-shot Claude &
+0.970 AUCPR, viable standalone \\
+Network intrusion, aggregate features &
+XGBoost; fine-tuned ModernBERT only with abundant labels &
+Zero-shot LLMs at chance; FT needs the full label set to tie XGB (0.833) \\
+Network intrusion, scarce labeled data &
+XGBoost &
+No FT signal below $\sim$2,000 labels; XGBoost is reliable under scarcity \\
+Network intrusion, per-packet features &
+XGBoost with a flow-aware split &
+Zero-shot LLMs at chance once leakage is removed \\
+Cost-constrained LLM deployment &
+A small local model behind an embedding gate &
+Gap collapses to $\sim$0.011 once gated; LLM used on only $\sim$4\% of inputs \\
+Any new domain &
+Measure LLM-only AUCPR against the class prior on a leakage-free split first &
+A high prior or leaky split can manufacture a false ``LLMs work'' result \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Which models are the best for each use case?}
+\label{sec:which-models-best}
+
+Table \ref{tab:practical-recommendations} cites the recommendations per use case based on our experimentation. Surprisingly, ModernBERT-FT and Router+BERT can be the best tradeoff between speed, cost, and quality for email classification, given the infrastructure and know-how to train them; a frontier model such as Claude is an easy, high-quality solution for language-related security classification. The story is different for tabular data, where specialized models are required for all use cases. Finally, it is worth evaluating the proper tool for any new use case such as alert classification, endpoint logs, and malware.
+
+\subsection{Model tradeoffs and cost/quality trade-offs}
+\label{sec:model-tradeoffs}
+
+Table~\ref{tab:cost-structure} reports measured inference cost for every model family on both domains. We timed 300 held-out records per family on one NVIDIA RTX 5060 Ti (16\,GB) at seed 42, one record at a time after a discarded warm-up. The benchmark bypasses the prediction cache: a cache hit returns a stored label in microseconds, so timing through it measures a dictionary lookup rather than inference.
+
+Training cost is paid once, inference cost accrues per record, and at security volumes that asymmetry decides the deployment. Classifying one million phishing emails costs \$0.00066 with XGBoost and \$1{,}219 with Claude Sonnet 4.6, a factor of $1.9\times10^{6}$. Fine-tuned ModernBERT lands between them at \$1.40 per million and answers 112 times faster per record ($10.8$\,ms against $1{,}213$\,ms), which confirms on our own hardware that a locally served single-pass model dominates a metered autoregressive call of equal accuracy \citep{warner2024modernbert}. Our data ablation (Section~\ref{sec:data-volume-ablation}) shows the training side needs only modest labeled data, so the encoder repays its one-time cost quickly.
+
+The reasoning decoder is the most expensive local option by a wide margin, and output length explains why. GPT-OSS emits 231 output tokens per phishing record against 22 for Llama3.2, and 341 against 15 on flows. That verbosity sets its cost at \$364 per million phishing records and $2{,}644$\,ms per record, roughly 11 times Llama3.2 on both axes, and it occupies $12.3$\,GB of VRAM against $2.3$\,GB. The accuracy gap between the two is small, so reasoning buys little on these classification tasks while costing an order of magnitude more. Because the models differ in family and size, this remains an observation rather than a controlled finding.
+
+Small fine-tuned encoders fit edge deployments and keep sensitive records on-premises. ModernBERT-FT needs 604\,MB of VRAM, 20 times less than GPT-OSS, and serves 425 flow records per second in batch. The frontier API needs no local accelerator at all, but it meters every call and sends every record off-premises.
+
+Three caveats bound these numbers. Throughput for the single-pass families is batched, and on phishing that batching pads every email to the longest in its batch, which is why frozen BERT reaches only 58.7 records/s there against 375 on the short flow serializations; length-bucketed batching would recover most of that gap. Claude's throughput is bound by client concurrency rather than by the model, so the single-stream figure understates a real deployment: at eight concurrent requests phishing throughput rises from 0.69 to 5.19 records/s while median latency holds at $1.23$\,s. Dollar figures for local models amortize rented hardware and are therefore an assumption rather than a measurement, whereas the Claude figure is metered at list price and is a real cost.
+
+\begin{table}[tbp]
+\centering
+\caption{Measured inference cost of the evaluated model families. Each family classifies the same 300 held-out records per domain on one NVIDIA RTX 5060 Ti (16\,GB), seed 42, one record at a time after a discarded warm-up, with the prediction cache bypassed. Latency is the median single-record wall clock. Throughput is batched for the single-pass families and single-stream for the decoders, which Ollama serves one request at a time; the dollar figure derives from the throughput shown in the same row. Local costs amortize rented hardware at \$0.40/GPU-hour and \$0.05/CPU-hour and are an assumption, not a measurement; the Claude figure is metered at list price (\$3 and \$15 per million input and output tokens) and is a real cost. VRAM is the peak attributable to the model over both domains, which agree within 5\%. XGBoost runs on CPU and Claude on a hosted API, so neither occupies local VRAM. All figures come from a single run on one machine.}
+\label{tab:cost-structure}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrrrrrrr@{}}
+\toprule
+ & & & \multicolumn{3}{c}{Phishing email} & \multicolumn{3}{c}{Kitsune Mirai flows} \\
+\cmidrule(lr){4-6}\cmidrule(lr){7-9}
+Model & Params & VRAM & p50 & rec/s & USD & p50 & rec/s & USD \\
+ & & (MB) & (ms) & & /1M & (ms) & & /1M \\
+\midrule
+XGBoost (hand-crafted) & --- & --- & $0.2$ & $21{,}096$ & $0.0007$ & $0.2$ & $22{,}569$ & $0.0006$ \\
+XGBoost on frozen BERT & $149$M & $606$ & $12.3$ & $58.7$ & $1.89$ & $5.9$ & $375$ & $0.30$ \\
+ModernBERT fine-tuned & $149$M & $604$ & $10.8$ & $79.2$ & $1.40$ & $7.4$ & $425$ & $0.26$ \\
+Llama3.2 & $3$B & $2{,}272$ & $242$ & $3.5$ & $32$ & $221$ & $4.5$ & $25$ \\
+Mistral & $7$B & $4{,}521$ & $326$ & $2.3$ & $48$ & $271$ & $2.3$ & $49$ \\
+Gemma3 & $12$B & $8{,}386$ & $794$ & $1.3$ & $88$ & $782$ & $1.3$ & $84$ \\
+GPT-OSS (reasoning) & $20$B & $12{,}330$ & $2{,}644$ & $0.31$ & $364$ & $3{,}294$ & $0.25$ & $450$ \\
+Claude Sonnet 4.6 & undisc. & --- & $1{,}213$ & $0.69$ & $1{,}219$ & $1{,}154$ & $0.72$ & $831$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{TabPFN-3 as a tabular base learner}
+\label{sec:tabpfn}
+\input{tabpfn_discussion}
+\noindent We kept tabular pre-trained transformers such as TabPFN-3 out of the main comparison to avoid diluting the LLM-versus-ML message, but its behavior as a base learner sharpens our thesis rather than complicating it (Table~\ref{tab:tabpfn-base}). With no task-specific training, TabPFN-3 beats XGBoost on identical features in both domains ($0.916\!\to\!0.953$ phishing, $0.845\!\to\!0.856$ flows), and as the head on frozen BERT embeddings it reaches $0.997$ on phishing, within $0.001$ of fully fine-tuned ModernBERT. It raises the strength of the \emph{base}, not the value of the LLM in the loop: stacking a decoder LLM onto a TabPFN base behaves just as it does onto XGBoost. And because TabPFN-3 is used in context with no training, closer to how we prompt an LLM than to a trained XGBoost, it shows the decoder LLM's failure is not a lack of task-specific fitting: a no-training \emph{tabular} foundation model still dominates it, so the problem is that the LLM is a text generator.
+
+
+\section{Related Work}
+\label{sec:related-work}
+
+Our study sits at the intersection of three lines of research: traditional ML for intrusion
+detection, LLMs for security classification, and ensembles combining the two.
+
+\paragraph{Traditional ML for intrusion detection.}
+Machine learning for separating malicious from benign signal in security data is mature and
+well surveyed \citep{buczak2016survey}. On network traffic, tree-based ensembles, XGBoost
+\citep{chen2016xgboost} foremost, remain the workhorse: they learn sharp decision boundaries from
+hand-crafted flow and packet statistics and infer cheaply at scale, repeatedly topping
+intrusion-detection leaderboards \citep{farnaaz2016randomforest}. The same holds for phishing, where
+engineered lexical and host-based URL features feed conventional classifiers to strong effect
+\citep{sahingoz2019phishing}. This establishes the strong baseline any LLM detector must beat; its
+persistent challenges, the base-rate fallacy under heavy class imbalance and the need for continual
+retraining, are the openings that motivate the turn to LLMs.
+
+\paragraph{LLMs for security classification.}
+A growing body of work prompts or fine-tunes LLMs for security detection, most visibly in the
+language-friendly phishing domain, where zero-shot and fine-tuned models reach high accuracy on email
+and URL text \citep{koide2024chatspamdetector}. Tabular network data is harder; the standard remedy
+serializes each row into a labeled, human-readable record, as in the TabLLM serialization
+\citep{hegselmann2023tabllm} we adopt for zero-shot prompting, while encoder fine-tuning with LoRA
+\citep{hu2022lora} on bidirectional backbones such as ModernBERT \citep{warner2024modernbert} is the
+parallel route for non-language features. Our results temper this optimism: once AUCPR
+\citep{davis2006relationship} is read against the class prior and per-packet data is split flow-aware,
+the surviving LLM signal is confined to genuinely semantic inputs, and on serialized flow statistics
+learned representations, not zero-shot prompting, are the lever: fine-tuning an encoder ties XGBoost, and a fine-tuned decoder narrowly surpasses it (Section~\ref{sec:fine-tuning-encoder}).
+
+\paragraph{Ensembles of LLMs and ML.}
+Stacking
+\citep{wolpert1992stacked} and mixture-of-experts routing \citep{jacobs1991adaptive} are the classical
+templates, and both reappear in the LLM era: EnStack stacks code-understanding LLMs under
+meta-classifiers including XGBoost for vulnerability detection \citep{ridoy2024enstack}, while RouteLLM
+\citep{ong2024routellm} and the cost-driven cascades of FrugalGPT \citep{chen2023frugalgpt} escalate
+only hard queries to an expensive model. These cost/quality framings inform the Router and Meta Learner
+ensembles we evaluate. Our contribution is to characterize, in the security setting, when this
+combination pays off: the question is not whether to combine an LLM with traditional ML, but which model
+to place behind the gate so the combination is both accurate and cheap to serve.
+
+\section{Conclusions and Future Work}
+\label{sec:conclusion}
+
+This paper asked whether LLMs should replace, or at least routinely supplement, traditional ML models for security classification. On the tasks we studied, the answer is mostly no. For well-labeled phishing and network intrusion datasets, strong traditional ML and encoder-based methods were enough to match or beat standalone decoder LLMs and ML-LLM ensembles.
+
+The network results make this clearest. Across the AfterImage, CIC-IDS2017, per-packet, and flow representations, zero-shot decoder LLMs stayed near the class prior while XGBoost performed well on the tabular features. Routing to the LLM only lowered AUCPR as more traffic was escalated; stacking was safer but still did not beat the traditional model; and fine-tuning tied XGBoost on serialized flow statistics for the encoder, and narrowly beat it for the decoder. Phishing was the LLMs' best case, since the input is natural language: the decoder LLMs did far better than on the network data and could lift weak baselines. Yet they still did not define the best classifier, because fine-tuned ModernBERT and embedding-based ML pipelines matched or beat them. Language-model representations were useful, but text-generating LLM inference was not the critical ingredient.
+
+Even so, the ensembles were not without value: they did not raise the ceiling but they raised the floor. Behind a strong embedding gate, a small, inexpensive model recovered most of a frontier LLM's quality while that costly model was invoked on only a small share of inputs. We tested the conjecture that models cope with unknowns on held-out network captures and phishing source partitions: same-capture performance did not transfer to a different attack capture, and routing or stacking cost-capped decoder scores did not restore cross-capture ranking; phishing performance also varied substantially when the held-out ham source came from an unseen corpus family, although no complete phishing bundle was fully family-disjoint. The most effective lever we found was training-data composition: a $5.5\%$ hard-negative swap removed most of the bulk-spam false-positive burden at no recall cost, and we recommend spam-aware negative pools as standard practice for phishing classifiers.
+
+These conclusions are limited to a small set of well-labeled cybersecurity classification tasks. They may not hold for tasks with very few labels, noisy labels, ambiguous ground truth, or no fixed dataset at all. They also may not hold for tasks that require multi-step reasoning rather than single-record classification. Future work should test LLM agents that can call classifiers, inspect evidence, and combine results across systems, for example in vulnerability discovery or codebase-level security analysis. Those settings may justify the extra cost and latency of LLM inference. For the classification settings studied here, traditional ML and encoder-based classifiers remain the better first choice.
+
+\bibliography{references}
+
+\end{document}
