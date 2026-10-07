@@ -5,11 +5,19 @@ Each domain provides:
   - A prompt template with a {text} placeholder
   - A row formatter that converts a DataFrame row to the text slot
 
-Backends supported: ollama, claude, gemini, modernbert-ft, decoder-ft
+Backends supported: ollama, claude, gemini, modernbert-ft, decoder-ft, jev, laya
 """
 
 import os
 import re
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# run_all.sh sources .env for the numbered suite, but warm_llm_cache.py and the
+# router experiments are run on their own, so load it where the keys are read.
+# Existing environment variables win.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 MAX_TEXT_LENGTH = 1000
 
@@ -476,6 +484,148 @@ def _classify_decoder_ft(text: str, model_dir: str) -> tuple[int, float]:
         return 0, 0.5
 
 
+# ── System One backends (Jev / Laya) ──────────────────────────────────────────
+
+# laya-serve exposes the same POST /v1/systemone shape as TypeSafe Jev, so one
+# client serves both: only the base URL and the bearer token differ.
+SYSTEMONE_BASE_URLS: dict[str, str] = {
+    "jev": "https://api.typesafe.ai",
+    "laya": "http://localhost:8000",
+}
+SYSTEMONE_KEY_ENV: dict[str, str | None] = {"jev": "TYPESAFE_API_KEY", "laya": None}
+
+# Two-option Choice with neutral option keys, not Noul: Laya's Noul can follow
+# its own true:/false: option labels instead of the state (laya issue #156),
+# which would land at chance AUCPR and read like a model finding. The yes/no
+# wording lives in the criteria descriptions instead. Jev 1.13 also reads
+# instructions literally -- vague criteria are a documented failure mode -- so each
+# criterion spells out its condition. This is deliberately more detailed than
+# DOMAIN_PROMPTS: Choice has no slot for a vague question, and underspecifying it
+# would measure prompt quality rather than the model. Report it as a difference in
+# how each family is queried, not as an identical prompt.
+SYSTEMONE_POSITIVE_KEY = "option_b"
+
+SYSTEMONE_QUESTIONS: dict[str, dict] = {
+    "phishing": {
+        "verdict": {
+            "type": "choice",
+            "instructions": "Classify this email or message.",
+            "criteria": {
+                "option_a": (
+                    "Legitimate: ordinary correspondence that does not try to obtain "
+                    "credentials, payment, or personal data under false pretenses."
+                ),
+                "option_b": (
+                    "Phishing: impersonates a trusted sender, or pressures the reader "
+                    "into revealing credentials, sending payment, or opening a hostile "
+                    "link or attachment."
+                ),
+            },
+        }
+    },
+    "network": {
+        "verdict": {
+            "type": "choice",
+            "instructions": (
+                "Analyze this network flow record and determine whether it represents "
+                "an attack or benign traffic."
+            ),
+            "criteria": {
+                "option_a": "Benign: ordinary client or server traffic.",
+                "option_b": (
+                    "Attack: port or host scanning, flooding or denial of service, "
+                    "brute-force login attempts, malware command-and-control, or other "
+                    "malicious network activity."
+                ),
+            },
+        }
+    },
+}
+
+
+def systemone_prompt(domain: str) -> str:
+    """Canonical JSON for a domain's System One questions.
+
+    Passed to classify_with_cache as prompt_template so the cache key tracks
+    the exact question sent: editing a criterion invalidates its cached answers
+    instead of silently serving answers to the previous wording.
+    """
+    import json
+    return json.dumps(SYSTEMONE_QUESTIONS[domain], sort_keys=True)
+
+
+SYSTEMONE_MODELS: dict[str, str] = {
+    "jev-1.13.0": "jev",
+    "convaiinnovations/laya": "laya",
+    "convaiinnovations/laya-multilingual": "laya",
+    "convaiinnovations/laya-typed-decisions": "laya",
+}
+
+# Backends whose confidence is P(positive) rather than confidence in the
+# returned label. Callers that rank by probability must not flip these to
+# 1-conf for negative predictions: that reverses the score of every negative
+# and collapses AUCPR to near the inverse of the true ranking.
+PROB_IS_POSITIVE_BACKENDS = {"modernbert-ft", "decoder-ft", "jev", "laya"}
+
+
+def backend_for(model: str) -> str:
+    """classify_with_cache backend for a model id."""
+    if model in SYSTEMONE_MODELS:
+        return SYSTEMONE_MODELS[model]
+    if model.startswith("claude"):
+        return "claude"
+    if model.startswith("gemini"):
+        return "gemini"
+    return "ollama"
+
+
+def prompt_for(model: str, domain: str) -> str:
+    """Prompt template for a model id: System One questions or the zero-shot prompt."""
+    if model in SYSTEMONE_MODELS:
+        return systemone_prompt(domain)
+    return DOMAIN_PROMPTS[domain]
+
+
+def _classify_systemone(
+    text: str, model: str, questions_json: str, base_url: str, api_key: str | None,
+) -> tuple[int, float] | None:
+    """POST /v1/systemone (Jev or laya-serve), scoring the positive class.
+
+    Returns (pred, P(attack)) taken straight from the Choice distribution --
+    these models emit calibrated probabilities, so there is no JSON to parse
+    and no _parse_llm_response heuristic. Returns None on failure, the same
+    contract as _classify_claude: a failed call is a missing prediction, not a
+    (0, 0.5) one.
+    """
+    import json
+    import time
+    import requests
+    truncated = text[:MAX_TEXT_LENGTH]
+    payload = {"state": truncated, "model": model, "questions": json.loads(questions_json)}
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                f"{base_url}/v1/systemone", json=payload, headers=headers, timeout=60,
+            )
+            # Jev meters tokens/sec and requests/min; a dropped 429 would quietly
+            # delete that sample from the metrics, so honor retry-after and retry.
+            if response.status_code == 429:
+                time.sleep(float(response.headers.get("Retry-After", 2 ** attempt)))
+                continue
+            response.raise_for_status()
+            probs = response.json()["answers"]["verdict"]["probabilities"]
+            prob = float(probs[SYSTEMONE_POSITIVE_KEY])
+            return int(prob >= 0.5), prob
+        except Exception as e:
+            print(f"  [systemone error] {model}: {e}")
+            return None
+    print(f"  [systemone error] {model}: rate-limited after 3 attempts")
+    return None
+
+
 def build_few_shot_prompt(base_template: str, examples_block: str) -> str:
     """Prepend few-shot examples into a {text}-style prompt template.
 
@@ -504,7 +654,7 @@ def classify_with_cache(
     cache_only: bool = False,
 ) -> tuple[int, float] | None:
     """Returns (pred, conf), or None if cache_only=True and the entry is not
-    cached, OR if a live API call (claude/gemini) failed. Callers must treat
+    cached, OR if a live API call (claude/gemini/jev/laya) failed. Callers must treat
     None as "exclude this sample from metrics" in both cases — a failed call
     is not a (0, 0.5) prediction, it's a missing one, and silently faking a
     prediction would contaminate AUCPR with an unlabeled coin-flip."""
@@ -529,6 +679,16 @@ def classify_with_cache(
         pred, conf = _classify_modernbert_ft(text, model)
     elif backend == "decoder-ft":
         pred, conf = _classify_decoder_ft(text, model)
+    elif backend in SYSTEMONE_BASE_URLS:
+        key_env = SYSTEMONE_KEY_ENV[backend]
+        result = _classify_systemone(
+            text, model, prompt_template,
+            os.environ.get(f"{backend.upper()}_BASE_URL", SYSTEMONE_BASE_URLS[backend]),
+            os.environ[key_env] if key_env else None,
+        )
+        if result is None:
+            return None  # transient/quota failure — exclude, don't poison the cache
+        pred, conf = result
     else:
         raise ValueError(f"Unknown backend: {backend}")
     cache[key] = [pred, conf]

@@ -16,7 +16,7 @@ if str(_ROOT) not in sys.path:
 from ml_llm_ensembles.utils.datasets import load_network_dataset
 from ml_llm_ensembles.utils.models import train_xgb, train_tabpfn, build_modernbert_features, xgb_device
 from ml_llm_ensembles.utils.prompts import (
-    DOMAIN_PROMPTS, classify_with_cache,
+    PROB_IS_POSITIVE_BACKENDS, backend_for, classify_with_cache, prompt_for,
     format_network_row_kitsune_pcap_flow, format_network_row_kitsune_pcap_flow_ft,
     KITSUNE_PCAP_FLOW_FEATURE_COLS,
 )
@@ -27,6 +27,8 @@ CACHE_DIR = _ROOT / "results" / "cache"
 CACHE_FILE = CACHE_DIR / "llm_cache.json"
 DECODERS = ["mistral", "gemma3:12b", "gpt-oss", "llama3.1:8b", "llama3.2"]
 CLAUDE = "claude-sonnet-4-6"
+JEV = "jev-1.13.0"            # pinned: jev-latest/jev-preview move on release
+LAYA = "convaiinnovations/laya"
 
 
 def parse_args():
@@ -35,6 +37,10 @@ def parse_args():
     p.add_argument("--data-dir", default="data/kitsune")
     p.add_argument("--models", nargs="*", default=DECODERS)
     p.add_argument("--claude", action="store_true", help="include Claude (cache-only)")
+    p.add_argument("--jev", action="store_true",
+                   help="include Jev System One (cache-only; warm_llm_cache.py first)")
+    p.add_argument("--laya", action="store_true",
+                   help="include Laya System One (cache-only; warm_llm_cache.py first)")
     p.add_argument("--ft-dir", type=Path, default=_ROOT / "models" / "modernbert-mirai-flows-ft",
                    help="merged validation-selected flows checkpoint from experiment 02")
     p.add_argument("--threshold", type=float, default=THRESHOLD)
@@ -51,12 +57,12 @@ def main():
     import pandas as pd
     from sklearn.model_selection import train_test_split
     from sklearn.impute import SimpleImputer
-    from sklearn.metrics import average_precision_score, roc_auc_score
+    from sklearn.metrics import (average_precision_score, roc_auc_score,
+                                 precision_recall_fscore_support)
 
     random.seed(args.seed); np.random.seed(args.seed)
     os.environ.setdefault("PYTHONHASHSEED", str(args.seed))
     cache = json.loads(CACHE_FILE.read_text()) if CACHE_FILE.exists() else {}
-    prompt = DOMAIN_PROMPTS["network"]
 
     # ── Load flows (1 row/flow) and split (TEST identical to exp-02/meta) ─────
     df = load_network_dataset("kitsune-mirai-pcap-flows", args.data_dir)
@@ -98,9 +104,14 @@ def main():
     pfn_bert_te = pfn_bert.predict_proba(Xb_te)
 
     def metrics(y, preds, probs):
+        # zero_division=0: a degenerate all-benign decoder has no positive
+        # predictions, which is a reportable result (P=R=F1=0), not an error.
+        pr, rc, f1, _ = precision_recall_fscore_support(
+            y, np.asarray(preds).astype(int), average="binary", zero_division=0)
         return {"aucpr": float(average_precision_score(y, probs)),
                 "rocauc": float(roc_auc_score(y, probs)),
-                "accuracy": float((np.asarray(preds) == y).mean())}
+                "accuracy": float((np.asarray(preds) == y).mean()),
+                "precision": float(pr), "recall": float(rc), "f1": float(f1)}
 
     rows = {}
     rows["XGB Only"] = metrics(y_test, xgb_te[:, 1] >= 0.5, xgb_te[:, 1])
@@ -116,10 +127,15 @@ def main():
     MIN_EVAL = 20   # floor so a small cached SUBSET (e.g. Claude) still reports,
                     # rather than being silently dropped; coverage is always shown.
     def llm_prob(text, model, backend):
+        prompt = prompt_for(model, "network")
         r = classify_with_cache(text, model, cache, prompt, backend, cache_only=True)
         if r is None: return None
         pred, conf = r
-        return int(pred), float(conf if pred == 1 else 1.0 - conf)
+        # System One and the FT tiers return P(attack) directly; only the
+        # decoder parse returns confidence in the label it chose.
+        p1 = (conf if backend in PROB_IS_POSITIVE_BACKENDS
+              else (conf if pred == 1 else 1.0 - conf))
+        return int(pred), float(p1)
 
     def eval_llm_only(model, backend):
         preds, P, Y = [], [], []
@@ -150,9 +166,10 @@ def main():
         m["n_evaluated"] = len(Y)
         return m
 
-    all_models = list(args.models) + ([CLAUDE] if args.claude else [])
+    all_models = (list(args.models) + ([CLAUDE] if args.claude else [])
+                  + ([JEV] if args.jev else []) + ([LAYA] if args.laya else []))
     for model in all_models:
-        backend = "claude" if model == CLAUDE else "ollama"
+        backend = backend_for(model)
         lo = eval_llm_only(model, backend)
         if lo: rows[f"{model} | LLM Only"] = lo
         r = eval_router(model, backend, xgb_te, args.threshold)
@@ -170,10 +187,10 @@ def main():
     sweep_gates = {"XGB": xgb_te, "TabPFN": pfn_te,
                    "XGB+BERT": xgb_bert_te, "TabPFN+BERT": pfn_bert_te}
     sweep = {}
-    for model in args.models:
+    for model in all_models:
         for gname, gate in sweep_gates.items():
             for thr in [float(x) for x in args.sweep.split(",")]:
-                r = eval_router(model, "ollama", gate, thr)
+                r = eval_router(model, backend_for(model), gate, thr)
                 if r: sweep[f"{model}@{gname}@{thr}"] = {
                     "aucpr": r["aucpr"], "routed_pct": r["routed_pct"]}
 
@@ -205,9 +222,11 @@ def main():
     else:
         print(f"  [warn] FT checkpoint {args.ft_dir} missing: run exp 02 first; FT tier skipped.")
 
-    print(f"\n{'config':32s} {'AUCPR':>7s} {'ROC':>7s} {'acc':>7s} {'route%':>7s} {'cov':>5s}")
+    print(f"\n{'config':32s} {'AUCPR':>7s} {'ROC':>7s} {'acc':>7s} {'prec':>7s} "
+          f"{'rec':>7s} {'F1':>7s} {'route%':>7s} {'cov':>5s}")
     for k, m in rows.items():
         print(f"{k:32s} {m['aucpr']:7.4f} {m['rocauc']:7.4f} {m['accuracy']:7.4f} "
+              f"{m['precision']:7.4f} {m['recall']:7.4f} {m['f1']:7.4f} "
               f"{m.get('routed_pct', float('nan')):7.1f} {m.get('coverage', 1.0):5.2f}")
     print("\nthreshold sweep (Router, XGB gate):")
     for k, v in sweep.items():
